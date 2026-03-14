@@ -19,10 +19,10 @@ def _chat_completion_sync(
     messages: list[dict[str, str]],
     *,
     deployment: str | None = None,
-    max_tokens: int = 1024,
-    temperature: float = 0.7,
+    max_completion_tokens: int = 1024,
+    temperature: float = 1.0,
 ) -> str:
-    """Synchronous call to Azure OpenAI (run in thread)."""
+    """Synchronous call to Azure OpenAI (run in thread). Uses default temperature=1 for compatibility with models that only support the default."""
     client = get_client()
     if not client:
         raise RuntimeError("Azure OpenAI is not configured (AZURE_OPENAI_ENDPOINT and AZURE_OPENAI_API_KEY).")
@@ -31,7 +31,7 @@ def _chat_completion_sync(
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_completion_tokens,
         temperature=temperature,
     )
     if not response.choices:
@@ -43,14 +43,14 @@ async def chat_completion(
     messages: list[dict[str, str]],
     *,
     deployment: str | None = None,
-    max_tokens: int = 1024,
-    temperature: float = 0.7,
+    max_completion_tokens: int = 1024,
+    temperature: float = 1.0,
 ) -> str:
     """Call Azure OpenAI chat completions and return the assistant message content."""
     return await asyncio.to_thread(
         _chat_completion_sync,
         messages,
         deployment=deployment,
-        max_tokens=max_tokens,
+        max_completion_tokens=max_completion_tokens,
         temperature=temperature,
     )

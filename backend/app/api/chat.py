@@ -15,8 +15,8 @@ class ChatMessage(BaseModel):
 
 class ChatRequest(BaseModel):
     messages: list[ChatMessage]
-    max_tokens: int = 1024
-    temperature: float = 0.7
+    max_completion_tokens: int = 1024
+    temperature: float = 1.0
 
 
 class ChatResponse(BaseModel):
@@ -35,7 +35,7 @@ async def chat_completions(body: ChatRequest):
     try:
         content = await azure_openai.chat_completion(
             messages,
-            max_tokens=body.max_tokens,
+            max_completion_tokens=body.max_completion_tokens,
             temperature=body.temperature,
         )
         return ChatResponse(content=content)

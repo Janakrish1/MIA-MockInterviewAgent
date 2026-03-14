@@ -1,7 +1,33 @@
 """Azure Speech Service — text-to-speech (replaces Kokoro)."""
+import struct
+
 import azure.cognitiveservices.speech as speechsdk
 
 from app.config import settings
+
+
+def _wav_header_for_pcm(num_samples: int, sample_rate: int = 16000, channels: int = 1) -> bytes:
+    """Build a minimal WAV header for 16-bit mono PCM (so browsers can play it)."""
+    byte_rate = sample_rate * channels * 2  # 16-bit = 2 bytes per sample
+    block_align = channels * 2
+    data_size = num_samples * 2
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,  # fmt chunk size (PCM)
+        1,   # audio format (PCM)
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        16,  # bits per sample
+        b"data",
+        data_size,
+    )
+    return header
 
 
 def get_speech_config() -> speechsdk.SpeechConfig:
@@ -13,9 +39,9 @@ def get_speech_config() -> speechsdk.SpeechConfig:
         subscription=settings.azure_speech_key,
         region=settings.azure_speech_region,
     )
-    # WAV (RIFF 16kHz 16bit mono) so frontend can play with Audio element
+    # Raw PCM avoids the RIFF codec path that can timeout ("Codec decoding is not started within 2s")
     config.set_speech_synthesis_output_format(
-        speechsdk.SpeechSynthesisOutputFormat.Riff16Khz16BitMonoPcm
+        speechsdk.SpeechSynthesisOutputFormat.Raw16Khz16BitMonoPcm
     )
     return config
 
@@ -27,7 +53,7 @@ def synthesize_to_bytes(
 ) -> bytes:
     """
     Synthesize text to speech and return audio as bytes (WAV).
-    Uses a neural voice by default (e.g. en-US-JennyNeural).
+    Uses raw PCM from SDK then prepends WAV header for browser playback.
     """
     config = get_speech_config()
     if voice_name:
@@ -35,12 +61,17 @@ def synthesize_to_bytes(
     else:
         config.speech_synthesis_voice_name = "en-US-JennyNeural"
 
-    # Synthesize to in-memory stream
     synthesizer = speechsdk.SpeechSynthesizer(speech_config=config, audio_config=None)
     result = synthesizer.speak_text_async(text).get()
 
     if result.reason == speechsdk.ResultReason.SynthesizingAudioCompleted:
-        return result.audio_data
+        pcm_data = result.audio_data
+        if not pcm_data:
+            raise RuntimeError("Speech synthesis returned no audio data")
+        # 16kHz, 16-bit mono: 2 bytes per sample
+        num_samples = len(pcm_data) // 2
+        header = _wav_header_for_pcm(num_samples, sample_rate=16000, channels=1)
+        return header + pcm_data
     if result.reason == speechsdk.ResultReason.Canceled:
         cancellation = result.cancellation_details
         raise RuntimeError(

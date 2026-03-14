@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Mic,
@@ -10,10 +10,21 @@ import {
   Code,
   Brain,
   Settings2,
+  Volume2,
+  Loader2,
+  AlertCircle,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import VoiceVisualizer from "@/components/VoiceVisualizer";
+import {
+  getFirstQuestion,
+  getNextAgentMessage,
+  synthesizeSpeech,
+  playAudio,
+  type ChatMessage,
+} from "@/lib/api";
+import { useToast } from "@/hooks/use-toast";
 
 type Message = {
   role: "agent" | "user";
@@ -21,49 +32,126 @@ type Message = {
   timestamp: string;
 };
 
-const MOCK_QUESTION =
-  "Given a binary tree, write a function to check if it is a valid binary search tree (BST). Explain your approach and analyze the time and space complexity.";
-
 const TOPICS = [
   { label: "Data Structures", icon: Code },
   { label: "Algorithms", icon: Brain },
   { label: "System Design", icon: Settings2 },
 ];
 
+function formatElapsed(seconds: number): string {
+  const m = Math.floor(seconds / 60);
+  const s = seconds % 60;
+  return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
+}
+
 const Interview = () => {
   const [phase, setPhase] = useState<"setup" | "active">("setup");
   const [isRecording, setIsRecording] = useState(false);
   const [textInput, setTextInput] = useState("");
   const [selectedTopic, setSelectedTopic] = useState("Data Structures");
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      role: "agent",
-      content: MOCK_QUESTION,
-      timestamp: "00:00",
-    },
-  ]);
-  const [elapsed, setElapsed] = useState("05:32");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [agentThinking, setAgentThinking] = useState(false);
+  const [backendError, setBackendError] = useState<string | null>(null);
+  const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
+  const { toast } = useToast();
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const handleSend = () => {
-    if (!textInput.trim()) return;
-    setMessages((prev) => [
-      ...prev,
-      { role: "user", content: textInput, timestamp: elapsed },
-    ]);
-    setTextInput("");
-    // Mock follow-up
-    setTimeout(() => {
-      setMessages((prev) => [
-        ...prev,
+  useEffect(() => {
+    if (phase !== "active") return;
+    timerRef.current = setInterval(() => setElapsedSeconds((s) => s + 1), 1000);
+    return () => {
+      if (timerRef.current) clearInterval(timerRef.current);
+    };
+  }, [phase]);
+
+  const speakAgentMessage = useCallback(async (text: string, msgIndex: number) => {
+    if (!text.trim()) return;
+    setSpeakingIndex(msgIndex);
+    try {
+      const blob = await synthesizeSpeech(text);
+      await playAudio(blob);
+    } catch (e) {
+      toast({
+        title: "Speech playback failed",
+        description: e instanceof Error ? e.message : "Could not play audio",
+        variant: "destructive",
+      });
+    } finally {
+      setSpeakingIndex(null);
+    }
+  }, [toast]);
+
+  const startInterview = useCallback(async () => {
+    setPhase("active");
+    setBackendError(null);
+    setAgentThinking(true);
+    try {
+      const firstQuestion = await getFirstQuestion(selectedTopic);
+      const timestamp = formatElapsed(0);
+      setMessages([
+        { role: "agent", content: firstQuestion, timestamp },
+      ]);
+      await speakAgentMessage(firstQuestion, 0);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Backend unavailable";
+      setBackendError(msg);
+      setMessages([
         {
           role: "agent",
-          content:
-            "Good approach! Can you walk me through how you'd handle the case where the tree has duplicate values? Also, could you optimize the space complexity?",
-          timestamp: elapsed,
+          content: "Could not connect to the interview backend. Please ensure the backend is running (see README) and try again.",
+          timestamp: "00:00",
         },
       ]);
-    }, 1500);
-  };
+      toast({
+        title: "Backend connection failed",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setAgentThinking(false);
+    }
+  }, [selectedTopic, speakAgentMessage, toast]);
+
+  const handleSend = useCallback(async () => {
+    const content = textInput.trim();
+    if (!content) return;
+
+    const timestamp = formatElapsed(elapsedSeconds);
+    setMessages((prev) => [...prev, { role: "user", content, timestamp }]);
+    setTextInput("");
+    setBackendError(null);
+    setAgentThinking(true);
+
+    try {
+      const conversationHistory: ChatMessage[] = messages
+        .filter((m) => m.role === "agent" || m.role === "user")
+        .map((m) => ({
+          role: m.role === "agent" ? "assistant" : "user",
+          content: m.content,
+        }));
+      conversationHistory.push({ role: "user", content });
+
+      const nextContent = await getNextAgentMessage(selectedTopic, conversationHistory);
+      const nextTimestamp = formatElapsed(elapsedSeconds);
+      setMessages((prev) => [
+        ...prev,
+        { role: "agent", content: nextContent, timestamp: nextTimestamp },
+      ]);
+      const newIndex = messages.length + 1;
+      await speakAgentMessage(nextContent, newIndex);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : "Request failed";
+      setBackendError(msg);
+      toast({
+        title: "Could not get next question",
+        description: msg,
+        variant: "destructive",
+      });
+    } finally {
+      setAgentThinking(false);
+    }
+  }, [textInput, elapsedSeconds, messages, selectedTopic, speakAgentMessage, toast]);
 
   if (phase === "setup") {
     return (
@@ -129,10 +217,20 @@ const Interview = () => {
           <Button
             size="lg"
             className="w-full gap-2 bg-primary text-primary-foreground hover:bg-primary/90 glow-primary"
-            onClick={() => setPhase("active")}
+            onClick={startInterview}
+            disabled={agentThinking}
           >
-            Begin Interview
-            <ChevronRight className="h-4 w-4" />
+            {agentThinking ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                Connecting to MIA...
+              </>
+            ) : (
+              <>
+                Begin Interview
+                <ChevronRight className="h-4 w-4" />
+              </>
+            )}
           </Button>
         </motion.div>
       </div>
@@ -154,13 +252,29 @@ const Interview = () => {
           </div>
           <div className="flex items-center gap-2 text-muted-foreground">
             <Clock className="h-4 w-4" />
-            <span className="font-mono text-sm">{elapsed}</span>
+            <span className="font-mono text-sm">{formatElapsed(elapsedSeconds)}</span>
           </div>
         </div>
       </div>
 
       {/* Main area */}
       <div className="flex flex-1 flex-col container mx-auto max-w-4xl px-6 py-6">
+        {/* Backend error banner */}
+        {backendError && (
+          <div className="mb-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+            <AlertCircle className="h-4 w-4 shrink-0" />
+            <span>{backendError}</span>
+          </div>
+        )}
+
+        {/* Agent thinking indicator */}
+        {agentThinking && (
+          <div className="mb-4 flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">
+            <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+            <span>MIA is thinking...</span>
+          </div>
+        )}
+
         {/* Messages */}
         <div className="flex-1 space-y-4 overflow-y-auto pb-4">
           <AnimatePresence>
@@ -188,6 +302,22 @@ const Interview = () => {
                     <span className="font-mono text-[10px] text-muted-foreground">
                       {msg.timestamp}
                     </span>
+                    {msg.role === "agent" && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+                        onClick={() => speakAgentMessage(msg.content, i)}
+                        disabled={speakingIndex === i}
+                        title="Play question aloud"
+                      >
+                        {speakingIndex === i ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Volume2 className="h-3 w-3" />
+                        )}
+                      </Button>
+                    )}
                   </div>
                   <p className="text-sm leading-relaxed text-foreground">
                     {msg.content}
@@ -241,11 +371,17 @@ const Interview = () => {
             <Button
               size="sm"
               onClick={handleSend}
-              disabled={!textInput.trim()}
+              disabled={!textInput.trim() || agentThinking}
               className="gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
             >
-              Send
-              <Send className="h-3 w-3" />
+              {agentThinking ? (
+                <Loader2 className="h-3 w-3 animate-spin" />
+              ) : (
+                <>
+                  Send
+                  <Send className="h-3 w-3" />
+                </>
+              )}
             </Button>
           </div>
         </div>
