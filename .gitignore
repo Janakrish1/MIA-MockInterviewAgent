@@ -32,6 +32,17 @@ coverage/
 playwright-report/
 test-results/
 
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+.venv/
+env/
+*.egg-info/
+.eggs/
+
 # Misc
 *.tgz
 .cache/

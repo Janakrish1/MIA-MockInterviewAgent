@@ -1,0 +1,13 @@
+# Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+
+# Azure OpenAI (GPT)
+openai>=1.55.0
+
+# Azure Speech Service (TTS)
+azure-cognitiveservices-speech>=1.48.0
+
+# Config & validation
+python-dotenv>=1.0.0
+pydantic-settings>=2.6.0
