@@ -6,20 +6,23 @@ import {
   Send,
   Clock,
   ChevronRight,
-  Upload,
   Code,
   Brain,
   Settings2,
   Volume2,
   Loader2,
   AlertCircle,
+  Upload,
+  FileText,
+  X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import VoiceVisualizer from "@/components/VoiceVisualizer";
 import {
-  getFirstQuestion,
-  getNextAgentMessage,
+  getFirstQuestionFromInterview,
+  getNextAgentMessageFromInterview,
+  uploadResume,
   synthesizeSpeech,
   playAudio,
   type ChatMessage,
@@ -30,6 +33,8 @@ type Message = {
   role: "agent" | "user";
   content: string;
   timestamp: string;
+  /** Difficulty of this question (easy/medium/hard) — from LangGraph adapt_difficulty; only set on agent messages. */
+  difficulty?: string | null;
 };
 
 const TOPICS = [
@@ -49,11 +54,16 @@ const Interview = () => {
   const [isRecording, setIsRecording] = useState(false);
   const [textInput, setTextInput] = useState("");
   const [selectedTopic, setSelectedTopic] = useState("Data Structures");
+  const [resumeSummary, setResumeSummary] = useState("");
+  const [resumeFileName, setResumeFileName] = useState<string | null>(null);
+  const [resumeUploading, setResumeUploading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [agentThinking, setAgentThinking] = useState(false);
   const [backendError, setBackendError] = useState<string | null>(null);
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
+  const [currentDifficulty, setCurrentDifficulty] = useState<string | null>(null);
   const { toast } = useToast();
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -87,12 +97,11 @@ const Interview = () => {
     setBackendError(null);
     setAgentThinking(true);
     try {
-      const firstQuestion = await getFirstQuestion(selectedTopic);
+      const { question, difficulty } = await getFirstQuestionFromInterview(selectedTopic, resumeSummary);
       const timestamp = formatElapsed(0);
-      setMessages([
-        { role: "agent", content: firstQuestion, timestamp },
-      ]);
-      await speakAgentMessage(firstQuestion, 0);
+      setMessages([{ role: "agent", content: question, timestamp, difficulty: difficulty ?? "medium" }]);
+      if (difficulty) setCurrentDifficulty(difficulty);
+      await speakAgentMessage(question, 0);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Backend unavailable";
       setBackendError(msg);
@@ -111,35 +120,48 @@ const Interview = () => {
     } finally {
       setAgentThinking(false);
     }
-  }, [selectedTopic, speakAgentMessage, toast]);
+  }, [selectedTopic, resumeSummary, speakAgentMessage, toast]);
 
   const handleSend = useCallback(async () => {
     const content = textInput.trim();
     if (!content) return;
 
     const timestamp = formatElapsed(elapsedSeconds);
-    setMessages((prev) => [...prev, { role: "user", content, timestamp }]);
+    const userMsg: Message = { role: "user", content, timestamp };
+    setMessages((prev) => [...prev, userMsg]);
     setTextInput("");
     setBackendError(null);
     setAgentThinking(true);
 
-    try {
-      const conversationHistory: ChatMessage[] = messages
-        .filter((m) => m.role === "agent" || m.role === "user")
-        .map((m) => ({
-          role: m.role === "agent" ? "assistant" : "user",
-          content: m.content,
-        }));
-      conversationHistory.push({ role: "user", content });
+    const currentQuestion = messages.filter((m) => m.role === "agent").pop()?.content ?? "";
+    const conversationHistory: ChatMessage[] = messages.map((m) => ({
+      role: m.role === "agent" ? "assistant" : "user",
+      content: m.content,
+    }));
+    conversationHistory.push({ role: "user", content });
 
-      const nextContent = await getNextAgentMessage(selectedTopic, conversationHistory);
+    try {
+      const { question, feedback, difficulty } = await getNextAgentMessageFromInterview(
+        selectedTopic,
+        resumeSummary,
+        conversationHistory,
+        content,
+        currentQuestion
+      );
       const nextTimestamp = formatElapsed(elapsedSeconds);
-      setMessages((prev) => [
-        ...prev,
-        { role: "agent", content: nextContent, timestamp: nextTimestamp },
-      ]);
-      const newIndex = messages.length + 1;
-      await speakAgentMessage(nextContent, newIndex);
+      const agentMsg: Message = {
+        role: "agent",
+        content: question,
+        timestamp: nextTimestamp,
+        difficulty: difficulty ?? undefined,
+      };
+      if (feedback) {
+        toast({ title: "Feedback", description: feedback });
+      }
+      if (difficulty) setCurrentDifficulty(difficulty);
+      setMessages((prev) => [...prev, agentMsg]);
+      const newIndex = messages.length + 2;
+      await speakAgentMessage(question, newIndex);
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Request failed";
       setBackendError(msg);
@@ -151,7 +173,7 @@ const Interview = () => {
     } finally {
       setAgentThinking(false);
     }
-  }, [textInput, elapsedSeconds, messages, selectedTopic, speakAgentMessage, toast]);
+  }, [textInput, elapsedSeconds, messages, selectedTopic, resumeSummary, speakAgentMessage, toast]);
 
   if (phase === "setup") {
     return (
@@ -168,18 +190,78 @@ const Interview = () => {
             Configure your mock interview session
           </p>
 
-          {/* Resume Upload */}
+          {/* Resume: upload PDF or paste */}
           <div className="mb-6">
             <label className="mb-2 block text-sm font-medium text-foreground">
               Resume (optional)
             </label>
-            <div className="flex cursor-pointer items-center justify-center rounded-xl border-2 border-dashed border-border bg-card px-6 py-10 transition-colors hover:border-primary/30">
-              <div className="text-center">
-                <Upload className="mx-auto mb-2 h-8 w-8 text-muted-foreground" />
-                <span className="text-sm text-muted-foreground">
-                  Drop your resume or click to upload
-                </span>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,application/pdf"
+              className="hidden"
+              onChange={async (e) => {
+                const f = e.target.files?.[0];
+                if (!f) return;
+                setResumeUploading(true);
+                try {
+                  const { resume_text } = await uploadResume(f);
+                  setResumeSummary(resume_text);
+                  setResumeFileName(f.name);
+                  toast({ title: "Resume uploaded", description: "Text extracted. You can edit below if needed." });
+                } catch (err) {
+                  toast({
+                    title: "Upload failed",
+                    description: err instanceof Error ? err.message : "Could not upload PDF",
+                    variant: "destructive",
+                  });
+                } finally {
+                  setResumeUploading(false);
+                  e.target.value = "";
+                }
+              }}
+            />
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center gap-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="gap-2 border-border"
+                  onClick={() => fileInputRef.current?.click()}
+                  disabled={resumeUploading}
+                >
+                  {resumeUploading ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : (
+                    <Upload className="h-4 w-4" />
+                  )}
+                  {resumeUploading ? "Uploading…" : "Upload PDF"}
+                </Button>
+                {resumeFileName && (
+                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <FileText className="h-3 w-3" />
+                    {resumeFileName}
+                    <button
+                      type="button"
+                      className="rounded p-0.5 hover:bg-muted"
+                      onClick={() => {
+                        setResumeFileName(null);
+                        setResumeSummary("");
+                      }}
+                      aria-label="Clear resume"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </span>
+                )}
               </div>
+              <Textarea
+                value={resumeSummary}
+                onChange={(e) => setResumeSummary(e.target.value)}
+                placeholder="Or paste a short summary of your background so MIA can tailor questions (skills, experience, role)."
+                className="min-h-[80px] resize-none border-border bg-card text-sm"
+              />
             </div>
           </div>
 
@@ -246,9 +328,11 @@ const Interview = () => {
             <span className="rounded-md bg-primary/10 px-2 py-1 font-mono text-xs text-primary">
               {selectedTopic}
             </span>
-            <span className="text-xs text-muted-foreground">
-              Question 1 of 5
-            </span>
+            {currentDifficulty && (
+              <span className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
+                {currentDifficulty}
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-2 text-muted-foreground">
             <Clock className="h-4 w-4" />
@@ -295,10 +379,23 @@ const Interview = () => {
                       : "bg-card border border-border"
                   }`}
                 >
-                  <div className="mb-1 flex items-center gap-2">
+                  <div className="mb-1 flex items-center gap-2 flex-wrap">
                     <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
                       {msg.role === "agent" ? "MIA" : "You"}
                     </span>
+                    {msg.role === "agent" && msg.difficulty && (
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+                          msg.difficulty === "easy"
+                            ? "bg-green-500/20 text-green-600 dark:text-green-400"
+                            : msg.difficulty === "hard"
+                              ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
+                              : "bg-blue-500/20 text-blue-600 dark:text-blue-400"
+                        }`}
+                      >
+                        {msg.difficulty}
+                      </span>
+                    )}
                     <span className="font-mono text-[10px] text-muted-foreground">
                       {msg.timestamp}
                     </span>

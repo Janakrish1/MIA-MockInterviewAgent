@@ -6,6 +6,28 @@
 const getBaseUrl = () =>
   (import.meta.env.VITE_API_URL as string) || "http://localhost:8000";
 
+/** Response from resume upload (PDF stored in backend documents/resumes, text extracted with PyPDF). */
+export type ResumeUploadResponse = { resume_id: string; resume_text: string };
+
+/** Upload a resume PDF; stored in backend documents/resumes/ (or resumes/{userId}/). Returns extracted text. */
+export async function uploadResume(
+  file: File,
+  userId?: string | null
+): Promise<ResumeUploadResponse> {
+  const form = new FormData();
+  form.append("file", file);
+  if (userId) form.append("user_id", userId);
+  const res = await fetch(`${getBaseUrl()}/api/resume/upload`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((err as { detail?: string }).detail || `Resume upload failed: ${res.status}`);
+  }
+  return res.json() as Promise<ResumeUploadResponse>;
+}
+
 export type ChatMessage = { role: "system" | "user" | "assistant"; content: string };
 
 export async function chatCompletion(messages: ChatMessage[]): Promise<string> {
@@ -68,7 +90,7 @@ The candidate's focus area is: ${focusArea}.`;
   return content.trim();
 }
 
-/** Get the next interviewer message (follow-up or next question) given conversation history. */
+/** Get the next interviewer message (follow-up or next question) given conversation history). */
 export async function getNextAgentMessage(
   focusArea: string,
   conversationHistory: ChatMessage[]
@@ -82,4 +104,68 @@ Focus area: ${focusArea}.`;
   ];
   const content = await chatCompletion(messages);
   return content.trim();
+}
+
+/** Response from the adaptive interview pipeline (LangGraph). */
+export type InterviewTurnResponse = {
+  question: string;
+  feedback: string | null;
+  difficulty: string | null;
+};
+
+/** One turn of the adaptive interview: score (if user answered) + adapt difficulty + generate & validate next question. */
+export async function interviewTurn(params: {
+  resumeSummary: string;
+  focusArea: string;
+  conversationHistory: ChatMessage[];
+  lastUserAnswer?: string | null;
+  currentQuestion?: string | null;
+}): Promise<InterviewTurnResponse> {
+  const res = await fetch(`${getBaseUrl()}/api/interview/turn`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      resume_summary: params.resumeSummary,
+      focus_area: params.focusArea,
+      conversation_history: params.conversationHistory,
+      last_user_answer: params.lastUserAnswer ?? null,
+      current_question: params.currentQuestion ?? null,
+    }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((err as { detail?: string }).detail || `Interview turn failed: ${res.status}`);
+  }
+  return res.json() as Promise<InterviewTurnResponse>;
+}
+
+/** First question from adaptive pipeline (resume + focus area; no scoring yet). */
+export async function getFirstQuestionFromInterview(
+  focusArea: string,
+  resumeSummary?: string
+): Promise<InterviewTurnResponse> {
+  return interviewTurn({
+    resumeSummary: resumeSummary ?? "",
+    focusArea,
+    conversationHistory: [],
+    lastUserAnswer: null,
+    currentQuestion: null,
+  });
+}
+
+/** Next question after user answered: score -> adapt difficulty -> generate next. */
+export async function getNextAgentMessageFromInterview(
+  focusArea: string,
+  resumeSummary: string,
+  conversationHistory: ChatMessage[],
+  lastUserAnswer: string,
+  currentQuestion: string
+): Promise<InterviewTurnResponse> {
+  return interviewTurn({
+    resumeSummary,
+    focusArea,
+    conversationHistory,
+    lastUserAnswer,
+    currentQuestion,
+  });
 }

@@ -43,6 +43,9 @@ env/
 *.egg-info/
 .eggs/
 
+# Uploaded documents (resumes)
+backend/documents/
+
 # Misc
 *.tgz
 .cache/

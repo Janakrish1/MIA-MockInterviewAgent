@@ -1,0 +1,22 @@
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	generate_question(generate_question)
+	validate_question(validate_question)
+	score_answer(score_answer)
+	adapt_difficulty(adapt_difficulty)
+	__end__([<p>__end__</p>]):::last
+	__start__ -.-> generate_question;
+	__start__ -.-> score_answer;
+	adapt_difficulty --> generate_question;
+	generate_question --> validate_question;
+	score_answer --> adapt_difficulty;
+	validate_question -.-> __end__;
+	validate_question -.-> generate_question;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc

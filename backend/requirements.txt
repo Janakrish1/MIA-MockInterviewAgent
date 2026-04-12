@@ -8,6 +8,14 @@ openai>=1.55.0
 # Azure Speech Service (TTS)
 azure-cognitiveservices-speech>=1.48.0
 
+# LangGraph orchestration (interview pipeline)
+langgraph>=0.2.0
+langchain-core>=0.3.0
+langchain-openai>=0.2.0
+
+# Resume parsing
+pypdf>=5.0.0
+
 # Config & validation
 python-dotenv>=1.0.0
 pydantic-settings>=2.6.0
