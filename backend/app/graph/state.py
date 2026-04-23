@@ -13,6 +13,9 @@ class InterviewState(TypedDict, total=False):
     last_user_answer: str | None
     last_score: float | None
     last_feedback: str | None
+    retrieval_query: str | None
+    retrieved_questions: list[dict[str, str | int | float | None]]
+    retrieval_error: str | None
     candidate_question: str | None  # output of generate_question
     question_valid: bool
     retry_count: int

@@ -1,5 +1,6 @@
 """Adaptive interview pipeline (LangGraph): generate question + validate + score answer + adapt difficulty."""
 import asyncio
+from statistics import mean
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
@@ -7,6 +8,7 @@ from pydantic import BaseModel
 from app.config import settings
 from app.graph.graph import get_interview_graph
 from app.graph.state import InterviewState
+from app.services.interview_feedback_store import append_feedback, read_feedback
 
 router = APIRouter()
 
@@ -14,6 +16,7 @@ router = APIRouter()
 class TurnRequest(BaseModel):
     resume_summary: str = ""
     focus_area: str = "Software Engineering"
+    interview_id: str | None = None
     conversation_history: list[dict[str, str]]  # [{"role":"user"|"assistant","content":"..."}]
     last_user_answer: str | None = None  # set when user just replied (so we score + adapt)
     current_question: str | None = None  # the question we're scoring (when last_user_answer is set)
@@ -25,11 +28,28 @@ class TurnResponse(BaseModel):
     difficulty: str | None = None  # from LangGraph "adapt_difficulty" node (easy/medium/hard) for the next question
 
 
+class InterviewReportResponse(BaseModel):
+    interview_id: str
+    total_answers_scored: int
+    average_score: float | None
+    feedback_entries: list[dict]
+
+
 def _run_graph(initial: InterviewState) -> dict:
     """Sync graph invocation (run in thread)."""
     graph = get_interview_graph()
     final_state = graph.invoke(initial)
     return final_state
+
+
+def _build_interviewer_prompt(question: str, score: float | None) -> str:
+    """Return the question as-is.
+
+    Conversational acknowledgement and transition are now generated inside the LangGraph
+    prompts (see ``generate_question`` / ``generate_followup_question``), so we no longer
+    prepend a hardcoded prefix here (which previously caused double-acknowledgement).
+    """
+    return question
 
 
 @router.post("/turn", response_model=TurnResponse)
@@ -46,7 +66,8 @@ async def interview_turn(body: TurnRequest):
         )
     initial: InterviewState = {
         "resume_summary": body.resume_summary,
-        "focus_area": body.focus_area,
+        # Force a single interview domain regardless of client input.
+        "focus_area": "Software Engineering",
         "conversation_history": body.conversation_history,
         "current_difficulty": "medium",
         "current_question": body.current_question,
@@ -57,7 +78,37 @@ async def interview_turn(body: TurnRequest):
     except Exception as e:
         raise HTTPException(status_code=502, detail=str(e))
 
-    question = final.get("final_question") or "Let's continue. What would you like to explore next?"
+    next_question = final.get("final_question") or "Let's continue. What would you like to explore next?"
     feedback = final.get("feedback_for_user")
+    score = final.get("last_score")
     difficulty = final.get("current_difficulty")
-    return TurnResponse(question=question, feedback=feedback, difficulty=difficulty)
+
+    if body.interview_id and body.last_user_answer and body.current_question and feedback is not None:
+        append_feedback(
+            interview_id=body.interview_id,
+            entry={
+                "question": body.current_question,
+                "answer": body.last_user_answer,
+                "score": score,
+                "feedback": feedback,
+                "next_difficulty": difficulty,
+                "next_question": next_question,
+            },
+        )
+
+    # Keep feedback in backend for reporting, but present interviewer-style response in UI.
+    conversational_question = _build_interviewer_prompt(next_question, score if body.last_user_answer else None)
+    return TurnResponse(question=conversational_question, feedback=None, difficulty=difficulty)
+
+
+@router.get("/report/{interview_id}", response_model=InterviewReportResponse)
+async def interview_report(interview_id: str):
+    entries = read_feedback(interview_id)
+    numeric_scores = [float(e["score"]) for e in entries if isinstance(e.get("score"), (int, float))]
+    avg = round(mean(numeric_scores), 2) if numeric_scores else None
+    return InterviewReportResponse(
+        interview_id=interview_id,
+        total_answers_scored=len(entries),
+        average_score=avg,
+        feedback_entries=entries,
+    )
