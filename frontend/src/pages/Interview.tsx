@@ -6,9 +6,6 @@ import {
   Send,
   Clock,
   ChevronRight,
-  Code,
-  Brain,
-  Settings2,
   Volume2,
   Loader2,
   AlertCircle,
@@ -25,9 +22,12 @@ import {
   uploadResume,
   synthesizeSpeech,
   playAudio,
+  transcribeSpeech,
   type ChatMessage,
 } from "@/lib/api";
+import { convertRecordingToWav16kMono } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
+import { useNavigate } from "react-router-dom";
 
 type Message = {
   role: "agent" | "user";
@@ -37,11 +37,8 @@ type Message = {
   difficulty?: string | null;
 };
 
-const TOPICS = [
-  { label: "Data Structures", icon: Code },
-  { label: "Algorithms", icon: Brain },
-  { label: "System Design", icon: Settings2 },
-];
+const INTRO_PROMPT =
+  "Hi, I am MIA, your interviewer today. To get started, could you please introduce yourself and briefly highlight your recent software engineering experience?";
 
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -52,8 +49,9 @@ function formatElapsed(seconds: number): string {
 const Interview = () => {
   const [phase, setPhase] = useState<"setup" | "active">("setup");
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [textInput, setTextInput] = useState("");
-  const [selectedTopic, setSelectedTopic] = useState("Data Structures");
+  const interviewDomain = "Software Engineering";
   const [resumeSummary, setResumeSummary] = useState("");
   const [resumeFileName, setResumeFileName] = useState<string | null>(null);
   const [resumeUploading, setResumeUploading] = useState(false);
@@ -65,7 +63,12 @@ const Interview = () => {
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
   const [currentDifficulty, setCurrentDifficulty] = useState<string | null>(null);
   const { toast } = useToast();
+  const navigate = useNavigate();
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const interviewIdRef = useRef<string>(crypto.randomUUID());
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     if (phase !== "active") return;
@@ -95,32 +98,10 @@ const Interview = () => {
   const startInterview = useCallback(async () => {
     setPhase("active");
     setBackendError(null);
-    setAgentThinking(true);
-    try {
-      const { question, difficulty } = await getFirstQuestionFromInterview(selectedTopic, resumeSummary);
-      const timestamp = formatElapsed(0);
-      setMessages([{ role: "agent", content: question, timestamp, difficulty: difficulty ?? "medium" }]);
-      if (difficulty) setCurrentDifficulty(difficulty);
-      await speakAgentMessage(question, 0);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Backend unavailable";
-      setBackendError(msg);
-      setMessages([
-        {
-          role: "agent",
-          content: "Could not connect to the interview backend. Please ensure the backend is running (see README) and try again.",
-          timestamp: "00:00",
-        },
-      ]);
-      toast({
-        title: "Backend connection failed",
-        description: msg,
-        variant: "destructive",
-      });
-    } finally {
-      setAgentThinking(false);
-    }
-  }, [selectedTopic, resumeSummary, speakAgentMessage, toast]);
+    setCurrentDifficulty(null);
+    setMessages([{ role: "agent", content: INTRO_PROMPT, timestamp: "00:00" }]);
+    await speakAgentMessage(INTRO_PROMPT, 0);
+  }, [resumeSummary, speakAgentMessage, toast]);
 
   const handleSend = useCallback(async () => {
     const content = textInput.trim();
@@ -141,13 +122,23 @@ const Interview = () => {
     conversationHistory.push({ role: "user", content });
 
     try {
-      const { question, feedback, difficulty } = await getNextAgentMessageFromInterview(
-        selectedTopic,
-        resumeSummary,
-        conversationHistory,
-        content,
-        currentQuestion
-      );
+      const firstTechnicalTurn =
+        messages.length === 1 &&
+        messages[0]?.role === "agent" &&
+        messages[0]?.content === INTRO_PROMPT;
+      const { question, difficulty } = firstTechnicalTurn
+        ? await getFirstQuestionFromInterview(
+            interviewIdRef.current,
+            resumeSummary,
+            conversationHistory
+          )
+        : await getNextAgentMessageFromInterview(
+            interviewIdRef.current,
+            resumeSummary,
+            conversationHistory,
+            content,
+            currentQuestion
+          );
       const nextTimestamp = formatElapsed(elapsedSeconds);
       const agentMsg: Message = {
         role: "agent",
@@ -155,9 +146,6 @@ const Interview = () => {
         timestamp: nextTimestamp,
         difficulty: difficulty ?? undefined,
       };
-      if (feedback) {
-        toast({ title: "Feedback", description: feedback });
-      }
       if (difficulty) setCurrentDifficulty(difficulty);
       setMessages((prev) => [...prev, agentMsg]);
       const newIndex = messages.length + 2;
@@ -173,7 +161,130 @@ const Interview = () => {
     } finally {
       setAgentThinking(false);
     }
-  }, [textInput, elapsedSeconds, messages, selectedTopic, resumeSummary, speakAgentMessage, toast]);
+  }, [textInput, elapsedSeconds, messages, resumeSummary, speakAgentMessage, toast]);
+
+  const endInterviewAndViewReport = useCallback(() => {
+    const interviewId = encodeURIComponent(interviewIdRef.current);
+    navigate(`/report?interviewId=${interviewId}&elapsed=${elapsedSeconds}`);
+  }, [elapsedSeconds, navigate]);
+
+  const stopRecording = useCallback(() => {
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state !== "inactive") {
+      rec.stop();
+    }
+    const stream = mediaStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+    setIsRecording(false);
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      toast({
+        title: "Microphone not supported",
+        description: "Your browser does not expose getUserMedia. Please use a recent Chrome, Edge, or Safari build.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (typeof MediaRecorder === "undefined") {
+      toast({
+        title: "Recording not supported",
+        description: "Your browser does not support MediaRecorder. Please use Chrome, Edge, or Safari.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      // Prefer Opus codecs that Azure STT accepts directly.
+      const preferredMimeTypes = [
+        "audio/webm;codecs=opus",
+        "audio/ogg;codecs=opus",
+        "audio/webm",
+      ];
+      const mimeType =
+        preferredMimeTypes.find((t) => MediaRecorder.isTypeSupported?.(t)) || "";
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e: BlobEvent) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+        if (!chunks.length) return;
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        const recordedBlob = new Blob(chunks, { type });
+        setIsTranscribing(true);
+        try {
+          // Azure STT short-audio REST only reliably accepts WAV PCM or Ogg/Opus,
+          // so we always transcode the browser's recording (usually webm/opus or mp4)
+          // to 16kHz mono WAV before upload.
+          const wavBlob = await convertRecordingToWav16kMono(recordedBlob);
+          const transcript = await transcribeSpeech(wavBlob);
+          if (!transcript) {
+            toast({
+              title: "Couldn't catch that",
+              description: "No speech was recognized. Please speak a bit longer or closer to the mic.",
+            });
+            return;
+          }
+          setTextInput((prev) => (prev ? `${prev} ${transcript}`.trim() : transcript));
+        } catch (e) {
+          toast({
+            title: "Transcription failed",
+            description: e instanceof Error ? e.message : "Unknown error",
+            variant: "destructive",
+          });
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      recorder.start();
+      setIsRecording(true);
+    } catch (e) {
+      toast({
+        title: "Microphone access denied",
+        description: e instanceof Error ? e.message : "Please allow microphone access and try again.",
+        variant: "destructive",
+      });
+      setIsRecording(false);
+    }
+  }, [toast]);
+
+  const toggleRecording = useCallback(() => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      void startRecording();
+    }
+  }, [isRecording, startRecording, stopRecording]);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup on unmount: stop any active recording + release the mic.
+      const rec = mediaRecorderRef.current;
+      if (rec && rec.state !== "inactive") {
+        try { rec.stop(); } catch { /* ignore */ }
+      }
+      const stream = mediaStreamRef.current;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
 
   if (phase === "setup") {
     return (
@@ -265,34 +376,13 @@ const Interview = () => {
             </div>
           </div>
 
-          {/* Topic */}
+          {/* Interview domain */}
           <div className="mb-8">
             <label className="mb-2 block text-sm font-medium text-foreground">
-              Focus Area
+              Interview Domain
             </label>
-            <div className="grid grid-cols-3 gap-3">
-              {TOPICS.map(({ label, icon: Icon }) => (
-                <button
-                  key={label}
-                  onClick={() => setSelectedTopic(label)}
-                  className={`flex flex-col items-center gap-2 rounded-xl border p-4 transition-all ${
-                    selectedTopic === label
-                      ? "border-primary/50 bg-primary/10 glow-primary"
-                      : "border-border bg-card hover:border-primary/20"
-                  }`}
-                >
-                  <Icon
-                    className={`h-5 w-5 ${
-                      selectedTopic === label
-                        ? "text-primary"
-                        : "text-muted-foreground"
-                    }`}
-                  />
-                  <span className="text-xs font-medium text-foreground">
-                    {label}
-                  </span>
-                </button>
-              ))}
+            <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-foreground">
+              {interviewDomain}
             </div>
           </div>
 
@@ -320,13 +410,13 @@ const Interview = () => {
   }
 
   return (
-    <div className="flex min-h-screen flex-col pt-16">
+    <div className="flex h-screen flex-col overflow-hidden pt-16">
       {/* Top bar */}
-      <div className="border-b border-border bg-card/50 px-6 py-3">
+      <div className="shrink-0 border-b border-border bg-card/50 px-6 py-3">
         <div className="container mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="rounded-md bg-primary/10 px-2 py-1 font-mono text-xs text-primary">
-              {selectedTopic}
+              {interviewDomain}
             </span>
             {currentDifficulty && (
               <span className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
@@ -337,149 +427,172 @@ const Interview = () => {
           <div className="flex items-center gap-2 text-muted-foreground">
             <Clock className="h-4 w-4" />
             <span className="font-mono text-sm">{formatElapsed(elapsedSeconds)}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-3"
+              onClick={endInterviewAndViewReport}
+            >
+              End Interview & View Report
+            </Button>
           </div>
         </div>
       </div>
 
       {/* Main area */}
-      <div className="flex flex-1 flex-col container mx-auto max-w-4xl px-6 py-6">
-        {/* Backend error banner */}
-        {backendError && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4 shrink-0" />
-            <span>{backendError}</span>
-          </div>
-        )}
+      <div className="flex-1 overflow-hidden">
+        <div className="container mx-auto flex h-full max-w-4xl flex-col px-6 py-6">
+          {/* Backend error banner */}
+          {backendError && (
+            <div className="mb-4 shrink-0 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{backendError}</span>
+            </div>
+          )}
 
-        {/* Agent thinking indicator */}
-        {agentThinking && (
-          <div className="mb-4 flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">
-            <Loader2 className="h-4 w-4 animate-spin shrink-0" />
-            <span>MIA is thinking...</span>
-          </div>
-        )}
+          {/* Agent thinking indicator */}
+          {agentThinking && (
+            <div className="mb-4 shrink-0 flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+              <span>MIA is thinking...</span>
+            </div>
+          )}
 
-        {/* Messages */}
-        <div className="flex-1 space-y-4 overflow-y-auto pb-4">
-          <AnimatePresence>
-            {messages.map((msg, i) => (
-              <motion.div
-                key={i}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3 }}
-                className={`flex ${
-                  msg.role === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[80%] rounded-2xl px-5 py-4 ${
-                    msg.role === "user"
-                      ? "bg-primary/10 border border-primary/20"
-                      : "bg-card border border-border"
+          {/* Messages */}
+          <div className="flex-1 space-y-4 overflow-y-auto pb-4">
+            <AnimatePresence>
+              {messages.map((msg, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className={`flex ${
+                    msg.role === "user" ? "justify-end" : "justify-start"
                   }`}
                 >
-                  <div className="mb-1 flex items-center gap-2 flex-wrap">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      {msg.role === "agent" ? "MIA" : "You"}
-                    </span>
-                    {msg.role === "agent" && msg.difficulty && (
-                      <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
-                          msg.difficulty === "easy"
-                            ? "bg-green-500/20 text-green-600 dark:text-green-400"
-                            : msg.difficulty === "hard"
-                              ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
-                              : "bg-blue-500/20 text-blue-600 dark:text-blue-400"
-                        }`}
-                      >
-                        {msg.difficulty}
+                  <div
+                    className={`max-w-[80%] rounded-2xl px-5 py-4 ${
+                      msg.role === "user"
+                        ? "bg-primary/10 border border-primary/20"
+                        : "bg-card border border-border"
+                    }`}
+                  >
+                    <div className="mb-1 flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {msg.role === "agent" ? "MIA" : "You"}
                       </span>
-                    )}
-                    <span className="font-mono text-[10px] text-muted-foreground">
-                      {msg.timestamp}
-                    </span>
-                    {msg.role === "agent" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-foreground"
-                        onClick={() => speakAgentMessage(msg.content, i)}
-                        disabled={speakingIndex === i}
-                        title="Play question aloud"
-                      >
-                        {speakingIndex === i ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Volume2 className="h-3 w-3" />
-                        )}
-                      </Button>
-                    )}
+                      {msg.role === "agent" && msg.difficulty && (
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+                            msg.difficulty === "easy"
+                              ? "bg-green-500/20 text-green-600 dark:text-green-400"
+                              : msg.difficulty === "hard"
+                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
+                                : "bg-blue-500/20 text-blue-600 dark:text-blue-400"
+                          }`}
+                        >
+                          {msg.difficulty}
+                        </span>
+                      )}
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {msg.timestamp}
+                      </span>
+                      {msg.role === "agent" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+                          onClick={() => speakAgentMessage(msg.content, i)}
+                          disabled={speakingIndex === i}
+                          title="Play question aloud"
+                        >
+                          {speakingIndex === i ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Volume2 className="h-3 w-3" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-sm leading-relaxed text-foreground">
+                      {msg.content}
+                    </p>
                   </div>
-                  <p className="text-sm leading-relaxed text-foreground">
-                    {msg.content}
-                  </p>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
 
-        {/* Voice visualizer */}
-        {isRecording && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mb-4 flex items-center justify-center rounded-xl border border-primary/20 bg-primary/5 py-4"
-          >
-            <VoiceVisualizer isActive={true} size="sm" />
-            <span className="ml-4 text-xs text-primary">Listening...</span>
-          </motion.div>
-        )}
+          {/* Voice visualizer */}
+          {(isRecording || isTranscribing) && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-4 shrink-0 flex items-center justify-center rounded-xl border border-primary/20 bg-primary/5 py-4"
+            >
+              <VoiceVisualizer isActive={isRecording} size="sm" />
+              <span className="ml-4 text-xs text-primary">
+                {isRecording ? "Listening... click mic to stop" : "Transcribing..."}
+              </span>
+            </motion.div>
+          )}
 
-        {/* Input area */}
-        <div className="rounded-xl border border-border bg-card p-3">
-          <Textarea
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            placeholder="Type your answer or use voice..."
-            className="min-h-[60px] resize-none border-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:ring-0"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
+          {/* Input area */}
+          <div className="shrink-0 rounded-xl border border-border bg-card p-3">
+            <Textarea
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              placeholder={
+                isRecording
+                  ? "Recording... speak your answer"
+                  : isTranscribing
+                    ? "Transcribing your voice..."
+                    : "Type your answer or click the mic to speak..."
               }
-            }}
-          />
-          <div className="mt-2 flex items-center justify-between">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setIsRecording(!isRecording)}
-              className={isRecording ? "text-primary" : "text-muted-foreground"}
-            >
-              {isRecording ? (
-                <MicOff className="h-4 w-4" />
-              ) : (
-                <Mic className="h-4 w-4" />
-              )}
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleSend}
-              disabled={!textInput.trim() || agentThinking}
-              className="gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              {agentThinking ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <>
-                  Send
-                  <Send className="h-3 w-3" />
-                </>
-              )}
-            </Button>
+              className="min-h-[60px] resize-none border-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:ring-0"
+              disabled={isRecording || isTranscribing}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+            />
+            <div className="mt-2 flex items-center justify-between">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={toggleRecording}
+                disabled={isTranscribing || agentThinking}
+                className={isRecording ? "text-primary" : "text-muted-foreground"}
+                title={isRecording ? "Stop recording" : "Record your answer"}
+              >
+                {isTranscribing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : isRecording ? (
+                  <MicOff className="h-4 w-4" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSend}
+                disabled={!textInput.trim() || agentThinking || isRecording || isTranscribing}
+                className="gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {agentThinking ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <>
+                    Send
+                    <Send className="h-3 w-3" />
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </div>
