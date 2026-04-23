@@ -5,12 +5,15 @@ import os
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
+from dotenv import load_dotenv
 from openai import AzureOpenAI
 from opensearchpy import OpenSearch
 from opensearchpy.exceptions import NotFoundError
 
 
 DATA_CSV_PATH = Path(__file__).resolve().parents[2] / "data" / "Software Questions.csv"
+ENV_PATH = Path(__file__).resolve().parents[2] / ".env"
+load_dotenv(ENV_PATH)
 DEFAULT_OPENSEARCH_INDEX = os.environ.get("OPENSEARCH_INDEX", "interview_questions")
 DEFAULT_EMBEDDING_MODEL = os.environ.get("AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-large")
 
@@ -62,9 +65,19 @@ def load_question_dataset(csv_path: Path = DATA_CSV_PATH) -> List[Dict[str, str]
     if not csv_path.exists():
         raise FileNotFoundError(f"Dataset CSV not found: {csv_path}")
 
-    with csv_path.open("r", encoding="utf-8", newline="") as csvfile:
-        reader = csv.DictReader(csvfile)
-        return [row for row in reader if row.get("Question")]
+    encodings_to_try = ("utf-8", "utf-8-sig", "cp1252", "latin-1")
+    last_error: UnicodeDecodeError | None = None
+    for encoding in encodings_to_try:
+        try:
+            with csv_path.open("r", encoding=encoding, newline="") as csvfile:
+                reader = csv.DictReader(csvfile)
+                return [row for row in reader if row.get("Question")]
+        except UnicodeDecodeError as exc:
+            last_error = exc
+            continue
+    if last_error is not None:
+        raise last_error
+    return []
 
 
 def chunked(iterable: Iterable[Any], size: int) -> Iterable[List[Any]]:
@@ -91,6 +104,11 @@ def ensure_vector_index(index_name: str = DEFAULT_OPENSEARCH_INDEX, dims: int = 
         return
 
     mapping = {
+        "settings": {
+            "index": {
+                "knn": True,
+            }
+        },
         "mappings": {
             "properties": {
                 "question_number": {"type": "integer"},
@@ -98,7 +116,15 @@ def ensure_vector_index(index_name: str = DEFAULT_OPENSEARCH_INDEX, dims: int = 
                 "answer": {"type": "text"},
                 "category": {"type": "keyword"},
                 "difficulty": {"type": "keyword"},
-                "question_vector": {"type": "dense_vector", "dims": dims},
+                "question_vector": {
+                    "type": "knn_vector",
+                    "dimension": dims,
+                    "method": {
+                        "name": "hnsw",
+                        "space_type": "cosinesimil",
+                        "engine": "nmslib",
+                    },
+                },
             }
         }
     }
@@ -136,12 +162,17 @@ def ingest_dataset_to_opensearch(
     if not rows:
         return 0
 
-    ensure_vector_index(index_name=index_name)
+    index_initialized = False
     total_indexed = 0
 
     for batch in chunked(rows, batch_size):
         texts = [row["Question"].strip() for row in batch]
         embeddings = embed_texts(texts, model=embedding_model)
+        if not embeddings:
+            continue
+        if not index_initialized:
+            ensure_vector_index(index_name=index_name, dims=len(embeddings[0]))
+            index_initialized = True
 
         for row, vector in zip(batch, embeddings):
             number = int(row.get("Question Number", row.get("question_number", "0")) or 0)
@@ -171,24 +202,29 @@ def search_similar_questions(
     client = get_opensearch_client()
     query_embedding = embed_texts([query], model=embedding_model)[0]
 
-    bool_query: Dict[str, Any] = {"must": [], "filter": []}
+    filters: List[Dict[str, Any]] = []
     if category:
-        bool_query["filter"].append({"term": {"category": category}})
+        filters.append({"term": {"category": category}})
     if difficulty:
-        bool_query["filter"].append({"term": {"difficulty": difficulty.lower()}})
+        filters.append({"term": {"difficulty": difficulty.lower()}})
 
-    search_body: Dict[str, Any] = {
-        "size": top_k,
-        "query": {
-            "script_score": {
-                "query": {"bool": bool_query},
-                "script": {
-                    "source": "cosineSimilarity(params.query_vector, 'question_vector') + 1.0",
-                    "params": {"query_vector": query_embedding},
-                },
+    knn_query: Dict[str, Any] = {
+        "knn": {
+            "question_vector": {
+                "vector": query_embedding,
+                "k": top_k,
             }
-        },
+        }
     }
+
+    search_body: Dict[str, Any] = {"size": top_k, "query": knn_query}
+    if filters:
+        search_body["query"] = {
+            "bool": {
+                "must": [knn_query],
+                "filter": filters,
+            }
+        }
 
     try:
         response = client.search(index=index_name, body=search_body)

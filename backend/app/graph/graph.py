@@ -1,10 +1,17 @@
-"""LangGraph for the adaptive interview pipeline: generate -> validate (with retry) and optionally score -> adapt -> generate."""
+"""LangGraph for adaptive interview pipeline with OpenSearch retrieval."""
 from pathlib import Path
 
 from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.graph.nodes import MAX_QUESTION_RETRIES, adapt_difficulty, generate_question, score_answer, validate_question
+from app.graph.nodes import (
+    MAX_QUESTION_RETRIES,
+    adapt_difficulty,
+    generate_question,
+    retrieve_related_questions,
+    score_answer,
+    validate_question,
+)
 from app.graph.state import InterviewState
 
 # Where to write the graph PNG when the graph is compiled (so you can see node connections)
@@ -34,6 +41,7 @@ def build_interview_graph() -> CompiledStateGraph[InterviewState, dict, dict]:
     builder.add_node("generate_question", generate_question)
     builder.add_node("validate_question", validate_question)
     builder.add_node("score_answer", score_answer)
+    builder.add_node("retrieve_related_questions", retrieve_related_questions)
     builder.add_node("adapt_difficulty", adapt_difficulty)
 
     # Start: either score (if user answered) or generate first question. path_map is required for correct graph viz.
@@ -43,7 +51,9 @@ def build_interview_graph() -> CompiledStateGraph[InterviewState, dict, dict]:
         path_map={"score_answer": "score_answer", "generate_question": "generate_question"},
     )
 
-    builder.add_edge("score_answer", "adapt_difficulty")
+    # User requested retrieval before difficulty adaptation.
+    builder.add_edge("score_answer", "retrieve_related_questions")
+    builder.add_edge("retrieve_related_questions", "adapt_difficulty")
     builder.add_edge("adapt_difficulty", "generate_question")
 
     builder.add_edge("generate_question", "validate_question")

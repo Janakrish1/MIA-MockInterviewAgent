@@ -7,6 +7,7 @@ Backend for **MIA (Mock Interview Agent)** — Azure OpenAI (GPT) for the MIA ag
 - **FastAPI** — API server
 - **Azure OpenAI** — Chat completions (GPT) for question generation and MIA agent
 - **Azure Speech Service** — Text-to-speech for interview questions
+- **OpenSearch** — Vector retrieval of similar interview questions (top-k grounding in interview loop)
 - **LangGraph** — Adaptive interview pipeline: generate question (resume + history) → validate → score answer → adapt difficulty
 
 ## Setup
@@ -32,6 +33,13 @@ Backend for **MIA (Mock Interview Agent)** — Azure OpenAI (GPT) for the MIA ag
    - **Azure Speech:** Create a [Speech resource](https://portal.azure.com) and set:
      - `AZURE_SPEECH_KEY`
      - `AZURE_SPEECH_REGION`
+  - **Embeddings deployment (for OpenSearch retrieval):**
+    - Set `AZURE_OPENAI_EMBEDDING_DEPLOYMENT` to your Azure embedding deployment name.
+      (Default in `.env.example` is `text-embedding-3-large`.)
+  - **OpenSearch (for retrieval):**
+    - Set `OPENSEARCH_HOST`, `OPENSEARCH_PORT`, `OPENSEARCH_INDEX`
+    - Optional auth: `OPENSEARCH_USER`, `OPENSEARCH_PASSWORD`
+    - Optional retrieval size: `OPENSEARCH_TOP_K` (default: `3`)
 
 ## Run
 
@@ -92,11 +100,28 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 
 - For the **first question**: omit `last_user_answer` and `current_question` (or set to `null`).
 - For **next question** after user answered: set `last_user_answer` and `current_question`. The pipeline will score the answer, adapt difficulty (easy/medium/hard), then generate and validate the next question.
+  It now also retrieves top-k semantically similar questions from OpenSearch before adapting difficulty.
 
 Response: `{ "question": "...", "feedback": "Optional scoring feedback.", "difficulty": "medium" }`.
 
 - **Feedback** comes from the LangGraph **score_answer** node (LLM evaluates your answer and returns short rubric-style feedback).
 - **Difficulty** comes from the **adapt_difficulty** node (easy/medium/hard) and is the level used for the *next* question.
+- **OpenSearch grounding** comes from **retrieve_related_questions** (top-k similar question retrieval using `last_user_answer` as query).
+
+## OpenSearch indexing (required for retrieval)
+
+Before retrieval can help interview generation, ingest the dataset into your OpenSearch index:
+
+```bash
+cd backend
+python app/services/opensearch_embeddings.py --index mia_interview_questions
+```
+
+Optional quick validation:
+
+```bash
+python app/services/opensearch_embeddings.py --index mia_interview_questions --query "binary search"
+```
 
 ### LangGraph pipeline image
 
