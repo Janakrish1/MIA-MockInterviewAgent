@@ -58,6 +58,16 @@ def retrieve_related_questions(state: InterviewState) -> dict:
             top_k=top_k,
         )
         print(f"Retrieved {len(retrieved)} related questions for query: {query}")
+        if retrieved:
+            for idx, item in enumerate(retrieved, start=1):
+                question = (item.get("question") or "").strip()
+                category = item.get("category")
+                difficulty = item.get("difficulty")
+                score = item.get("score")
+                print(
+                    f"Retrieved Q{idx}: score={score} category={category} "
+                    f"difficulty={difficulty} question={question}"
+                )
         return {"retrieval_query": query, "retrieved_questions": retrieved, "retrieval_error": None}
     except Exception as exc:
         # Retrieval should not break the interview flow.
@@ -69,7 +79,7 @@ def generate_question(state: InterviewState) -> dict:
     """Generate next interview question using resume + history + current difficulty."""
     llm = get_llm()
     resume = state.get("resume_summary") or "(No resume provided.)"
-    focus = state.get("focus_area") or "Software Engineering"
+    focus = "Software Engineering"
     difficulty = state.get("current_difficulty") or "medium"
     history = state.get("conversation_history") or []
     last_feedback = state.get("last_feedback")
@@ -103,6 +113,53 @@ Conversation so far:
     response = llm.invoke(messages)
     question = (response.content or "").strip()
     print("Generate question: ", question)
+    return {"candidate_question": question, "retry_count": state.get("retry_count", 0)}
+
+
+def generate_followup_question(state: InterviewState) -> dict:
+    """Generate a targeted follow-up for the most recent question and answer."""
+    llm = get_llm()
+    resume = state.get("resume_summary") or "(No resume provided.)"
+    difficulty = state.get("current_difficulty") or "medium"
+    history = state.get("conversation_history") or []
+    current_question = (state.get("current_question") or "").strip()
+    last_user_answer = (state.get("last_user_answer") or "").strip()
+    last_feedback = (state.get("last_feedback") or "").strip()
+    retrieved_questions = state.get("retrieved_questions") or []
+
+    history_str = _format_history(history)
+    retrieved_str = _format_retrieved_questions(retrieved_questions)
+    prompt = f"""You are MIA, a Mock Interview Agent conducting a software engineering interview.
+You must ask ONE follow-up question that builds directly on the candidate's previous answer.
+
+Current difficulty level: {difficulty}
+Candidate resume summary: {resume}
+Previous interviewer question: {current_question}
+Candidate answer: {last_user_answer}
+Scoring feedback: {last_feedback}
+
+Conversation so far:
+{history_str}
+"""
+    if retrieved_str:
+        prompt += (
+            "\nOpenSearch retrieved related questions for grounding "
+            "(use for relevance only, do not copy verbatim):\n"
+            f"{retrieved_str}\n"
+        )
+
+    prompt += (
+        "\nOutput exactly ONE concise follow-up interview question that probes missing depth from the answer. "
+        "Do not switch topics, do not add explanation, and do not include numbering."
+    )
+
+    messages = [
+        SystemMessage(content="You output only a single follow-up interview question, nothing else."),
+        HumanMessage(content=prompt),
+    ]
+    response = llm.invoke(messages)
+    question = (response.content or "").strip()
+    print("Generate follow-up question: ", question)
     return {"candidate_question": question, "retry_count": state.get("retry_count", 0)}
 
 
