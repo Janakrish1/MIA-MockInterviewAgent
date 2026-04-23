@@ -61,6 +61,34 @@ export async function synthesizeSpeech(text: string, voiceName?: string): Promis
   return res.blob();
 }
 
+/** Transcribe a recorded audio blob (candidate voice input) via Azure Speech STT. */
+export async function transcribeSpeech(
+  audio: Blob,
+  language: string = "en-US"
+): Promise<string> {
+  const form = new FormData();
+  const filename =
+    audio.type.includes("webm") ? "audio.webm"
+    : audio.type.includes("ogg") ? "audio.ogg"
+    : audio.type.includes("mp4") ? "audio.mp4"
+    : audio.type.includes("wav") ? "audio.wav"
+    : "audio.bin";
+  form.append("audio", audio, filename);
+  form.append("language", language);
+  const res = await fetch(`${getBaseUrl()}/api/speech/transcribe`, {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(
+      (err as { detail?: string }).detail || `Transcription failed: ${res.status}`
+    );
+  }
+  const data = (await res.json()) as { text: string };
+  return (data.text || "").trim();
+}
+
 /** Play TTS blob in the browser (WAV from Azure Speech). */
 export function playAudio(blob: Blob): Promise<void> {
   return new Promise((resolve, reject) => {
