@@ -1,4 +1,5 @@
 """LangGraph for adaptive interview pipeline with OpenSearch retrieval."""
+import os
 from pathlib import Path
 
 from langgraph.graph import END, StateGraph
@@ -7,6 +8,7 @@ from langgraph.graph.state import CompiledStateGraph
 from app.graph.nodes import (
     MAX_QUESTION_RETRIES,
     adapt_difficulty,
+    generate_followup_question,
     generate_question,
     retrieve_related_questions,
     score_answer,
@@ -34,11 +36,26 @@ def _route_after_validate(state: InterviewState) -> str:
     return "__end__"
 
 
+def _route_after_adapt(state: InterviewState) -> str:
+    """
+    Ask a follow-up when score indicates the previous answer needs deeper probing;
+    otherwise move to a fresh question.
+    """
+    if not (state.get("last_user_answer") and state.get("current_question")):
+        return "generate_question"
+    threshold = float(os.environ.get("FOLLOWUP_SCORE_THRESHOLD", "3.5"))
+    score = float(state.get("last_score") or 3.0)
+    if score < threshold:
+        return "generate_followup_question"
+    return "generate_question"
+
+
 def build_interview_graph() -> CompiledStateGraph[InterviewState, dict, dict]:
     """Build and compile the interview pipeline graph."""
     builder = StateGraph(InterviewState)
 
     builder.add_node("generate_question", generate_question)
+    builder.add_node("generate_followup_question", generate_followup_question)
     builder.add_node("validate_question", validate_question)
     builder.add_node("score_answer", score_answer)
     builder.add_node("retrieve_related_questions", retrieve_related_questions)
@@ -54,9 +71,17 @@ def build_interview_graph() -> CompiledStateGraph[InterviewState, dict, dict]:
     # User requested retrieval before difficulty adaptation.
     builder.add_edge("score_answer", "retrieve_related_questions")
     builder.add_edge("retrieve_related_questions", "adapt_difficulty")
-    builder.add_edge("adapt_difficulty", "generate_question")
+    builder.add_conditional_edges(
+        "adapt_difficulty",
+        _route_after_adapt,
+        path_map={
+            "generate_followup_question": "generate_followup_question",
+            "generate_question": "generate_question",
+        },
+    )
 
     builder.add_edge("generate_question", "validate_question")
+    builder.add_edge("generate_followup_question", "validate_question")
     builder.add_conditional_edges(
         "validate_question",
         _route_after_validate,

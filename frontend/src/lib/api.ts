@@ -79,10 +79,10 @@ export function playAudio(blob: Blob): Promise<void> {
 }
 
 /** Get first interviewer question from backend, then optionally speak it. */
-export async function getFirstQuestion(focusArea: string): Promise<string> {
+export async function getFirstQuestion(_focusArea: string): Promise<string> {
   const systemPrompt = `You are MIA, a Mock Interview Agent. You conduct technical software engineering interviews. 
 Ask one clear, focused interview question at a time. Be concise and professional. 
-The candidate's focus area is: ${focusArea}.`;
+The candidate's interview domain is: Software Engineering.`;
   const content = await chatCompletion([
     { role: "system", content: systemPrompt },
     { role: "user", content: "Start the interview. Ask the first question only." },
@@ -92,12 +92,12 @@ The candidate's focus area is: ${focusArea}.`;
 
 /** Get the next interviewer message (follow-up or next question) given conversation history). */
 export async function getNextAgentMessage(
-  focusArea: string,
+  _focusArea: string,
   conversationHistory: ChatMessage[]
 ): Promise<string> {
   const systemPrompt = `You are MIA, a Mock Interview Agent. You conduct technical software engineering interviews. 
 Ask one follow-up question or give brief feedback, then one new question if appropriate. Be concise. 
-Focus area: ${focusArea}.`;
+Interview domain: Software Engineering.`;
   const messages: ChatMessage[] = [
     { role: "system", content: systemPrompt },
     ...conversationHistory,
@@ -113,10 +113,27 @@ export type InterviewTurnResponse = {
   difficulty: string | null;
 };
 
+export type InterviewFeedbackEntry = {
+  timestamp: string;
+  question: string;
+  answer: string;
+  score: number | null;
+  feedback: string;
+  next_difficulty: string | null;
+  next_question: string;
+};
+
+export type InterviewReportResponse = {
+  interview_id: string;
+  total_answers_scored: number;
+  average_score: number | null;
+  feedback_entries: InterviewFeedbackEntry[];
+};
+
 /** One turn of the adaptive interview: score (if user answered) + adapt difficulty + generate & validate next question. */
 export async function interviewTurn(params: {
+  interviewId: string;
   resumeSummary: string;
-  focusArea: string;
   conversationHistory: ChatMessage[];
   lastUserAnswer?: string | null;
   currentQuestion?: string | null;
@@ -126,7 +143,8 @@ export async function interviewTurn(params: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       resume_summary: params.resumeSummary,
-      focus_area: params.focusArea,
+      focus_area: "Software Engineering",
+      interview_id: params.interviewId,
       conversation_history: params.conversationHistory,
       last_user_answer: params.lastUserAnswer ?? null,
       current_question: params.currentQuestion ?? null,
@@ -141,12 +159,12 @@ export async function interviewTurn(params: {
 
 /** First question from adaptive pipeline (resume + focus area; no scoring yet). */
 export async function getFirstQuestionFromInterview(
-  focusArea: string,
+  interviewId: string,
   resumeSummary?: string
 ): Promise<InterviewTurnResponse> {
   return interviewTurn({
+    interviewId,
     resumeSummary: resumeSummary ?? "",
-    focusArea,
     conversationHistory: [],
     lastUserAnswer: null,
     currentQuestion: null,
@@ -155,17 +173,26 @@ export async function getFirstQuestionFromInterview(
 
 /** Next question after user answered: score -> adapt difficulty -> generate next. */
 export async function getNextAgentMessageFromInterview(
-  focusArea: string,
+  interviewId: string,
   resumeSummary: string,
   conversationHistory: ChatMessage[],
   lastUserAnswer: string,
   currentQuestion: string
 ): Promise<InterviewTurnResponse> {
   return interviewTurn({
+    interviewId,
     resumeSummary,
-    focusArea,
     conversationHistory,
     lastUserAnswer,
     currentQuestion,
   });
+}
+
+export async function getInterviewReport(interviewId: string): Promise<InterviewReportResponse> {
+  const res = await fetch(`${getBaseUrl()}/api/interview/report/${encodeURIComponent(interviewId)}`);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error((err as { detail?: string }).detail || `Report fetch failed: ${res.status}`);
+  }
+  return res.json() as Promise<InterviewReportResponse>;
 }

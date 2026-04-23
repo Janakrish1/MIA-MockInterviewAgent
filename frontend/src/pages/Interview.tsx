@@ -6,9 +6,6 @@ import {
   Send,
   Clock,
   ChevronRight,
-  Code,
-  Brain,
-  Settings2,
   Volume2,
   Loader2,
   AlertCircle,
@@ -28,6 +25,7 @@ import {
   type ChatMessage,
 } from "@/lib/api";
 import { useToast } from "@/hooks/use-toast";
+import { useNavigate } from "react-router-dom";
 
 type Message = {
   role: "agent" | "user";
@@ -36,12 +34,6 @@ type Message = {
   /** Difficulty of this question (easy/medium/hard) — from LangGraph adapt_difficulty; only set on agent messages. */
   difficulty?: string | null;
 };
-
-const TOPICS = [
-  { label: "Data Structures", icon: Code },
-  { label: "Algorithms", icon: Brain },
-  { label: "System Design", icon: Settings2 },
-];
 
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
@@ -53,7 +45,7 @@ const Interview = () => {
   const [phase, setPhase] = useState<"setup" | "active">("setup");
   const [isRecording, setIsRecording] = useState(false);
   const [textInput, setTextInput] = useState("");
-  const [selectedTopic, setSelectedTopic] = useState("Data Structures");
+  const interviewDomain = "Software Engineering";
   const [resumeSummary, setResumeSummary] = useState("");
   const [resumeFileName, setResumeFileName] = useState<string | null>(null);
   const [resumeUploading, setResumeUploading] = useState(false);
@@ -65,7 +57,9 @@ const Interview = () => {
   const [speakingIndex, setSpeakingIndex] = useState<number | null>(null);
   const [currentDifficulty, setCurrentDifficulty] = useState<string | null>(null);
   const { toast } = useToast();
+  const navigate = useNavigate();
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const interviewIdRef = useRef<string>(crypto.randomUUID());
 
   useEffect(() => {
     if (phase !== "active") return;
@@ -97,7 +91,10 @@ const Interview = () => {
     setBackendError(null);
     setAgentThinking(true);
     try {
-      const { question, difficulty } = await getFirstQuestionFromInterview(selectedTopic, resumeSummary);
+      const { question, difficulty } = await getFirstQuestionFromInterview(
+        interviewIdRef.current,
+        resumeSummary
+      );
       const timestamp = formatElapsed(0);
       setMessages([{ role: "agent", content: question, timestamp, difficulty: difficulty ?? "medium" }]);
       if (difficulty) setCurrentDifficulty(difficulty);
@@ -120,7 +117,7 @@ const Interview = () => {
     } finally {
       setAgentThinking(false);
     }
-  }, [selectedTopic, resumeSummary, speakAgentMessage, toast]);
+  }, [resumeSummary, speakAgentMessage, toast]);
 
   const handleSend = useCallback(async () => {
     const content = textInput.trim();
@@ -141,8 +138,8 @@ const Interview = () => {
     conversationHistory.push({ role: "user", content });
 
     try {
-      const { question, feedback, difficulty } = await getNextAgentMessageFromInterview(
-        selectedTopic,
+      const { question, difficulty } = await getNextAgentMessageFromInterview(
+        interviewIdRef.current,
         resumeSummary,
         conversationHistory,
         content,
@@ -155,9 +152,6 @@ const Interview = () => {
         timestamp: nextTimestamp,
         difficulty: difficulty ?? undefined,
       };
-      if (feedback) {
-        toast({ title: "Feedback", description: feedback });
-      }
       if (difficulty) setCurrentDifficulty(difficulty);
       setMessages((prev) => [...prev, agentMsg]);
       const newIndex = messages.length + 2;
@@ -173,7 +167,12 @@ const Interview = () => {
     } finally {
       setAgentThinking(false);
     }
-  }, [textInput, elapsedSeconds, messages, selectedTopic, resumeSummary, speakAgentMessage, toast]);
+  }, [textInput, elapsedSeconds, messages, resumeSummary, speakAgentMessage, toast]);
+
+  const endInterviewAndViewReport = useCallback(() => {
+    const interviewId = encodeURIComponent(interviewIdRef.current);
+    navigate(`/report?interviewId=${interviewId}&elapsed=${elapsedSeconds}`);
+  }, [elapsedSeconds, navigate]);
 
   if (phase === "setup") {
     return (
@@ -265,34 +264,13 @@ const Interview = () => {
             </div>
           </div>
 
-          {/* Topic */}
+          {/* Interview domain */}
           <div className="mb-8">
             <label className="mb-2 block text-sm font-medium text-foreground">
-              Focus Area
+              Interview Domain
             </label>
-            <div className="grid grid-cols-3 gap-3">
-              {TOPICS.map(({ label, icon: Icon }) => (
-                <button
-                  key={label}
-                  onClick={() => setSelectedTopic(label)}
-                  className={`flex flex-col items-center gap-2 rounded-xl border p-4 transition-all ${
-                    selectedTopic === label
-                      ? "border-primary/50 bg-primary/10 glow-primary"
-                      : "border-border bg-card hover:border-primary/20"
-                  }`}
-                >
-                  <Icon
-                    className={`h-5 w-5 ${
-                      selectedTopic === label
-                        ? "text-primary"
-                        : "text-muted-foreground"
-                    }`}
-                  />
-                  <span className="text-xs font-medium text-foreground">
-                    {label}
-                  </span>
-                </button>
-              ))}
+            <div className="rounded-xl border border-primary/30 bg-primary/10 px-4 py-3 text-sm text-foreground">
+              {interviewDomain}
             </div>
           </div>
 
@@ -326,7 +304,7 @@ const Interview = () => {
         <div className="container mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="rounded-md bg-primary/10 px-2 py-1 font-mono text-xs text-primary">
-              {selectedTopic}
+              {interviewDomain}
             </span>
             {currentDifficulty && (
               <span className="rounded-md bg-muted px-2 py-1 text-xs text-muted-foreground">
@@ -337,6 +315,14 @@ const Interview = () => {
           <div className="flex items-center gap-2 text-muted-foreground">
             <Clock className="h-4 w-4" />
             <span className="font-mono text-sm">{formatElapsed(elapsedSeconds)}</span>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-3"
+              onClick={endInterviewAndViewReport}
+            >
+              End Interview & View Report
+            </Button>
           </div>
         </div>
       </div>
