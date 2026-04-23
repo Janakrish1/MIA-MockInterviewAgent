@@ -160,12 +160,13 @@ export async function interviewTurn(params: {
 /** First question from adaptive pipeline (resume + focus area; no scoring yet). */
 export async function getFirstQuestionFromInterview(
   interviewId: string,
-  resumeSummary?: string
+  resumeSummary?: string,
+  conversationHistory?: ChatMessage[]
 ): Promise<InterviewTurnResponse> {
   return interviewTurn({
     interviewId,
     resumeSummary: resumeSummary ?? "",
-    conversationHistory: [],
+    conversationHistory: conversationHistory ?? [],
     lastUserAnswer: null,
     currentQuestion: null,
   });

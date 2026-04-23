@@ -12,13 +12,14 @@ graph TD;
 	retrieve_related_questions(retrieve_related_questions)
 	adapt_difficulty(adapt_difficulty)
 	__end__([<p>__end__</p>]):::last
-	__start__ -.-> generate_question;
+	__start__ -.-> retrieve_related_questions;
 	__start__ -.-> score_answer;
 	adapt_difficulty -.-> generate_followup_question;
 	adapt_difficulty -.-> generate_question;
 	generate_followup_question --> validate_question;
 	generate_question --> validate_question;
-	retrieve_related_questions --> adapt_difficulty;
+	retrieve_related_questions -.-> adapt_difficulty;
+	retrieve_related_questions -.-> generate_question;
 	score_answer --> retrieve_related_questions;
 	validate_question -.-> __end__;
 	validate_question -.-> generate_question;
