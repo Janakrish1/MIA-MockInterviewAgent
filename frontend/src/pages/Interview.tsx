@@ -22,8 +22,10 @@ import {
   uploadResume,
   synthesizeSpeech,
   playAudio,
+  transcribeSpeech,
   type ChatMessage,
 } from "@/lib/api";
+import { convertRecordingToWav16kMono } from "@/lib/audio";
 import { useToast } from "@/hooks/use-toast";
 import { useNavigate } from "react-router-dom";
 
@@ -47,6 +49,7 @@ function formatElapsed(seconds: number): string {
 const Interview = () => {
   const [phase, setPhase] = useState<"setup" | "active">("setup");
   const [isRecording, setIsRecording] = useState(false);
+  const [isTranscribing, setIsTranscribing] = useState(false);
   const [textInput, setTextInput] = useState("");
   const interviewDomain = "Software Engineering";
   const [resumeSummary, setResumeSummary] = useState("");
@@ -63,6 +66,9 @@ const Interview = () => {
   const navigate = useNavigate();
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const interviewIdRef = useRef<string>(crypto.randomUUID());
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const mediaStreamRef = useRef<MediaStream | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     if (phase !== "active") return;
@@ -161,6 +167,124 @@ const Interview = () => {
     const interviewId = encodeURIComponent(interviewIdRef.current);
     navigate(`/report?interviewId=${interviewId}&elapsed=${elapsedSeconds}`);
   }, [elapsedSeconds, navigate]);
+
+  const stopRecording = useCallback(() => {
+    const rec = mediaRecorderRef.current;
+    if (rec && rec.state !== "inactive") {
+      rec.stop();
+    }
+    const stream = mediaStreamRef.current;
+    if (stream) {
+      stream.getTracks().forEach((t) => t.stop());
+      mediaStreamRef.current = null;
+    }
+    setIsRecording(false);
+  }, []);
+
+  const startRecording = useCallback(async () => {
+    if (typeof navigator === "undefined" || !navigator.mediaDevices?.getUserMedia) {
+      toast({
+        title: "Microphone not supported",
+        description: "Your browser does not expose getUserMedia. Please use a recent Chrome, Edge, or Safari build.",
+        variant: "destructive",
+      });
+      return;
+    }
+    if (typeof MediaRecorder === "undefined") {
+      toast({
+        title: "Recording not supported",
+        description: "Your browser does not support MediaRecorder. Please use Chrome, Edge, or Safari.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStreamRef.current = stream;
+
+      // Prefer Opus codecs that Azure STT accepts directly.
+      const preferredMimeTypes = [
+        "audio/webm;codecs=opus",
+        "audio/ogg;codecs=opus",
+        "audio/webm",
+      ];
+      const mimeType =
+        preferredMimeTypes.find((t) => MediaRecorder.isTypeSupported?.(t)) || "";
+
+      const recorder = mimeType
+        ? new MediaRecorder(stream, { mimeType })
+        : new MediaRecorder(stream);
+      mediaRecorderRef.current = recorder;
+      audioChunksRef.current = [];
+
+      recorder.ondataavailable = (e: BlobEvent) => {
+        if (e.data && e.data.size > 0) audioChunksRef.current.push(e.data);
+      };
+
+      recorder.onstop = async () => {
+        const chunks = audioChunksRef.current;
+        audioChunksRef.current = [];
+        if (!chunks.length) return;
+        const type = recorder.mimeType || mimeType || "audio/webm";
+        const recordedBlob = new Blob(chunks, { type });
+        setIsTranscribing(true);
+        try {
+          // Azure STT short-audio REST only reliably accepts WAV PCM or Ogg/Opus,
+          // so we always transcode the browser's recording (usually webm/opus or mp4)
+          // to 16kHz mono WAV before upload.
+          const wavBlob = await convertRecordingToWav16kMono(recordedBlob);
+          const transcript = await transcribeSpeech(wavBlob);
+          if (!transcript) {
+            toast({
+              title: "Couldn't catch that",
+              description: "No speech was recognized. Please speak a bit longer or closer to the mic.",
+            });
+            return;
+          }
+          setTextInput((prev) => (prev ? `${prev} ${transcript}`.trim() : transcript));
+        } catch (e) {
+          toast({
+            title: "Transcription failed",
+            description: e instanceof Error ? e.message : "Unknown error",
+            variant: "destructive",
+          });
+        } finally {
+          setIsTranscribing(false);
+        }
+      };
+
+      recorder.start();
+      setIsRecording(true);
+    } catch (e) {
+      toast({
+        title: "Microphone access denied",
+        description: e instanceof Error ? e.message : "Please allow microphone access and try again.",
+        variant: "destructive",
+      });
+      setIsRecording(false);
+    }
+  }, [toast]);
+
+  const toggleRecording = useCallback(() => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      void startRecording();
+    }
+  }, [isRecording, startRecording, stopRecording]);
+
+  useEffect(() => {
+    return () => {
+      // Cleanup on unmount: stop any active recording + release the mic.
+      const rec = mediaRecorderRef.current;
+      if (rec && rec.state !== "inactive") {
+        try { rec.stop(); } catch { /* ignore */ }
+      }
+      const stream = mediaStreamRef.current;
+      if (stream) stream.getTracks().forEach((t) => t.stop());
+    };
+  }, []);
 
   if (phase === "setup") {
     return (
@@ -401,15 +525,17 @@ const Interview = () => {
           </div>
 
           {/* Voice visualizer */}
-          {isRecording && (
+          {(isRecording || isTranscribing) && (
             <motion.div
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: "auto" }}
               exit={{ opacity: 0, height: 0 }}
               className="mb-4 shrink-0 flex items-center justify-center rounded-xl border border-primary/20 bg-primary/5 py-4"
             >
-              <VoiceVisualizer isActive={true} size="sm" />
-              <span className="ml-4 text-xs text-primary">Listening...</span>
+              <VoiceVisualizer isActive={isRecording} size="sm" />
+              <span className="ml-4 text-xs text-primary">
+                {isRecording ? "Listening... click mic to stop" : "Transcribing..."}
+              </span>
             </motion.div>
           )}
 
@@ -418,8 +544,15 @@ const Interview = () => {
             <Textarea
               value={textInput}
               onChange={(e) => setTextInput(e.target.value)}
-              placeholder="Type your answer or use voice..."
+              placeholder={
+                isRecording
+                  ? "Recording... speak your answer"
+                  : isTranscribing
+                    ? "Transcribing your voice..."
+                    : "Type your answer or click the mic to speak..."
+              }
               className="min-h-[60px] resize-none border-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:ring-0"
+              disabled={isRecording || isTranscribing}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
                   e.preventDefault();
@@ -431,10 +564,14 @@ const Interview = () => {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => setIsRecording(!isRecording)}
+                onClick={toggleRecording}
+                disabled={isTranscribing || agentThinking}
                 className={isRecording ? "text-primary" : "text-muted-foreground"}
+                title={isRecording ? "Stop recording" : "Record your answer"}
               >
-                {isRecording ? (
+                {isTranscribing ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : isRecording ? (
                   <MicOff className="h-4 w-4" />
                 ) : (
                   <Mic className="h-4 w-4" />
@@ -443,7 +580,7 @@ const Interview = () => {
               <Button
                 size="sm"
                 onClick={handleSend}
-                disabled={!textInput.trim() || agentThinking}
+                disabled={!textInput.trim() || agentThinking || isRecording || isTranscribing}
                 className="gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
               >
                 {agentThinking ? (
