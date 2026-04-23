@@ -1,8 +1,11 @@
 """Nodes for the adaptive interview LangGraph pipeline."""
+import os
+
 from langchain_core.messages import HumanMessage, SystemMessage
 
 from app.graph.llm import get_llm
 from app.graph.state import InterviewState
+from app.services.opensearch_embeddings import search_similar_questions
 
 MAX_QUESTION_RETRIES = 2
 
@@ -21,6 +24,47 @@ def _format_history(history: list[dict[str, str]]) -> str:
     return "\n".join(lines) if lines else "(No prior messages yet.)"
 
 
+def _format_retrieved_questions(retrieved: list[dict[str, str | int | float | None]]) -> str:
+    if not retrieved:
+        return ""
+    lines = []
+    for idx, item in enumerate(retrieved, start=1):
+        question = str(item.get("question") or "").strip()
+        if not question:
+            continue
+        difficulty = str(item.get("difficulty") or "unknown").strip()
+        category = str(item.get("category") or "unknown").strip()
+        lines.append(f"{idx}. {question} (category: {category}, difficulty: {difficulty})")
+    return "\n".join(lines)
+
+
+def retrieve_related_questions(state: InterviewState) -> dict:
+    """
+    Retrieve top-k similar questions from OpenSearch to ground the next turn.
+    This node runs after scoring and before difficulty adaptation.
+    """
+    query = (
+        (state.get("last_user_answer") or "").strip()
+        or (state.get("current_question") or "").strip()
+        or (state.get("focus_area") or "").strip()
+    )
+    if not query:
+        return {"retrieval_query": None, "retrieved_questions": [], "retrieval_error": None}
+
+    top_k = int(os.environ.get("OPENSEARCH_TOP_K", "3"))
+    try:
+        retrieved = search_similar_questions(
+            query=query,
+            top_k=top_k,
+        )
+        print(f"Retrieved {len(retrieved)} related questions for query: {query}")
+        return {"retrieval_query": query, "retrieved_questions": retrieved, "retrieval_error": None}
+    except Exception as exc:
+        # Retrieval should not break the interview flow.
+        print("OpenSearch retrieval error: ", str(exc))
+        return {"retrieval_query": query, "retrieved_questions": [], "retrieval_error": str(exc)}
+
+
 def generate_question(state: InterviewState) -> dict:
     """Generate next interview question using resume + history + current difficulty."""
     llm = get_llm()
@@ -29,8 +73,10 @@ def generate_question(state: InterviewState) -> dict:
     difficulty = state.get("current_difficulty") or "medium"
     history = state.get("conversation_history") or []
     last_feedback = state.get("last_feedback")
+    retrieved_questions = state.get("retrieved_questions") or []
 
     history_str = _format_history(history)
+    retrieved_str = _format_retrieved_questions(retrieved_questions)
     prompt = f"""You are MIA, a Mock Interview Agent. Conduct a technical software engineering interview.
 Focus area: {focus}
 Current difficulty level: {difficulty}
@@ -41,6 +87,12 @@ Conversation so far:
 """
     if last_feedback:
         prompt += f"\nScoring feedback from last answer (use to adapt): {last_feedback}\n"
+    if retrieved_str:
+        prompt += (
+            "\nOpenSearch retrieved similar questions for grounding "
+            "(use them for topic relevance, but DO NOT repeat verbatim):\n"
+            f"{retrieved_str}\n"
+        )
 
     prompt += "\nOutput exactly ONE clear interview question. No preamble, no numbering. Just the question."
 
