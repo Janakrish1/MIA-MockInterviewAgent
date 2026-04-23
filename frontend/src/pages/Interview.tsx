@@ -35,6 +35,9 @@ type Message = {
   difficulty?: string | null;
 };
 
+const INTRO_PROMPT =
+  "Hi, I am MIA, your interviewer today. To get started, could you please introduce yourself and briefly highlight your recent software engineering experience?";
+
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = seconds % 60;
@@ -89,34 +92,9 @@ const Interview = () => {
   const startInterview = useCallback(async () => {
     setPhase("active");
     setBackendError(null);
-    setAgentThinking(true);
-    try {
-      const { question, difficulty } = await getFirstQuestionFromInterview(
-        interviewIdRef.current,
-        resumeSummary
-      );
-      const timestamp = formatElapsed(0);
-      setMessages([{ role: "agent", content: question, timestamp, difficulty: difficulty ?? "medium" }]);
-      if (difficulty) setCurrentDifficulty(difficulty);
-      await speakAgentMessage(question, 0);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : "Backend unavailable";
-      setBackendError(msg);
-      setMessages([
-        {
-          role: "agent",
-          content: "Could not connect to the interview backend. Please ensure the backend is running (see README) and try again.",
-          timestamp: "00:00",
-        },
-      ]);
-      toast({
-        title: "Backend connection failed",
-        description: msg,
-        variant: "destructive",
-      });
-    } finally {
-      setAgentThinking(false);
-    }
+    setCurrentDifficulty(null);
+    setMessages([{ role: "agent", content: INTRO_PROMPT, timestamp: "00:00" }]);
+    await speakAgentMessage(INTRO_PROMPT, 0);
   }, [resumeSummary, speakAgentMessage, toast]);
 
   const handleSend = useCallback(async () => {
@@ -138,13 +116,23 @@ const Interview = () => {
     conversationHistory.push({ role: "user", content });
 
     try {
-      const { question, difficulty } = await getNextAgentMessageFromInterview(
-        interviewIdRef.current,
-        resumeSummary,
-        conversationHistory,
-        content,
-        currentQuestion
-      );
+      const firstTechnicalTurn =
+        messages.length === 1 &&
+        messages[0]?.role === "agent" &&
+        messages[0]?.content === INTRO_PROMPT;
+      const { question, difficulty } = firstTechnicalTurn
+        ? await getFirstQuestionFromInterview(
+            interviewIdRef.current,
+            resumeSummary,
+            conversationHistory
+          )
+        : await getNextAgentMessageFromInterview(
+            interviewIdRef.current,
+            resumeSummary,
+            conversationHistory,
+            content,
+            currentQuestion
+          );
       const nextTimestamp = formatElapsed(elapsedSeconds);
       const agentMsg: Message = {
         role: "agent",
@@ -298,9 +286,9 @@ const Interview = () => {
   }
 
   return (
-    <div className="flex min-h-screen flex-col pt-16">
+    <div className="flex h-screen flex-col overflow-hidden pt-16">
       {/* Top bar */}
-      <div className="border-b border-border bg-card/50 px-6 py-3">
+      <div className="shrink-0 border-b border-border bg-card/50 px-6 py-3">
         <div className="container mx-auto flex items-center justify-between">
           <div className="flex items-center gap-3">
             <span className="rounded-md bg-primary/10 px-2 py-1 font-mono text-xs text-primary">
@@ -328,144 +316,146 @@ const Interview = () => {
       </div>
 
       {/* Main area */}
-      <div className="flex flex-1 flex-col container mx-auto max-w-4xl px-6 py-6">
-        {/* Backend error banner */}
-        {backendError && (
-          <div className="mb-4 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
-            <AlertCircle className="h-4 w-4 shrink-0" />
-            <span>{backendError}</span>
-          </div>
-        )}
+      <div className="flex-1 overflow-hidden">
+        <div className="container mx-auto flex h-full max-w-4xl flex-col px-6 py-6">
+          {/* Backend error banner */}
+          {backendError && (
+            <div className="mb-4 shrink-0 flex items-center gap-2 rounded-lg border border-destructive/50 bg-destructive/10 px-4 py-2 text-sm text-destructive">
+              <AlertCircle className="h-4 w-4 shrink-0" />
+              <span>{backendError}</span>
+            </div>
+          )}
 
-        {/* Agent thinking indicator */}
-        {agentThinking && (
-          <div className="mb-4 flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">
-            <Loader2 className="h-4 w-4 animate-spin shrink-0" />
-            <span>MIA is thinking...</span>
-          </div>
-        )}
+          {/* Agent thinking indicator */}
+          {agentThinking && (
+            <div className="mb-4 shrink-0 flex items-center gap-2 rounded-xl border border-primary/20 bg-primary/5 px-4 py-3 text-sm text-primary">
+              <Loader2 className="h-4 w-4 animate-spin shrink-0" />
+              <span>MIA is thinking...</span>
+            </div>
+          )}
 
-        {/* Messages */}
-        <div className="flex-1 space-y-4 overflow-y-auto pb-4">
-          <AnimatePresence>
-            {messages.map((msg, i) => (
-              <motion.div
-                key={i}
-                initial={{ opacity: 0, y: 10 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3 }}
-                className={`flex ${
-                  msg.role === "user" ? "justify-end" : "justify-start"
-                }`}
-              >
-                <div
-                  className={`max-w-[80%] rounded-2xl px-5 py-4 ${
-                    msg.role === "user"
-                      ? "bg-primary/10 border border-primary/20"
-                      : "bg-card border border-border"
+          {/* Messages */}
+          <div className="flex-1 space-y-4 overflow-y-auto pb-4">
+            <AnimatePresence>
+              {messages.map((msg, i) => (
+                <motion.div
+                  key={i}
+                  initial={{ opacity: 0, y: 10 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.3 }}
+                  className={`flex ${
+                    msg.role === "user" ? "justify-end" : "justify-start"
                   }`}
                 >
-                  <div className="mb-1 flex items-center gap-2 flex-wrap">
-                    <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
-                      {msg.role === "agent" ? "MIA" : "You"}
-                    </span>
-                    {msg.role === "agent" && msg.difficulty && (
-                      <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
-                          msg.difficulty === "easy"
-                            ? "bg-green-500/20 text-green-600 dark:text-green-400"
-                            : msg.difficulty === "hard"
-                              ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
-                              : "bg-blue-500/20 text-blue-600 dark:text-blue-400"
-                        }`}
-                      >
-                        {msg.difficulty}
+                  <div
+                    className={`max-w-[80%] rounded-2xl px-5 py-4 ${
+                      msg.role === "user"
+                        ? "bg-primary/10 border border-primary/20"
+                        : "bg-card border border-border"
+                    }`}
+                  >
+                    <div className="mb-1 flex items-center gap-2 flex-wrap">
+                      <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+                        {msg.role === "agent" ? "MIA" : "You"}
                       </span>
-                    )}
-                    <span className="font-mono text-[10px] text-muted-foreground">
-                      {msg.timestamp}
-                    </span>
-                    {msg.role === "agent" && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-foreground"
-                        onClick={() => speakAgentMessage(msg.content, i)}
-                        disabled={speakingIndex === i}
-                        title="Play question aloud"
-                      >
-                        {speakingIndex === i ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <Volume2 className="h-3 w-3" />
-                        )}
-                      </Button>
-                    )}
+                      {msg.role === "agent" && msg.difficulty && (
+                        <span
+                          className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-medium ${
+                            msg.difficulty === "easy"
+                              ? "bg-green-500/20 text-green-600 dark:text-green-400"
+                              : msg.difficulty === "hard"
+                                ? "bg-amber-500/20 text-amber-600 dark:text-amber-400"
+                                : "bg-blue-500/20 text-blue-600 dark:text-blue-400"
+                          }`}
+                        >
+                          {msg.difficulty}
+                        </span>
+                      )}
+                      <span className="font-mono text-[10px] text-muted-foreground">
+                        {msg.timestamp}
+                      </span>
+                      {msg.role === "agent" && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-6 w-6 shrink-0 p-0 text-muted-foreground hover:text-foreground"
+                          onClick={() => speakAgentMessage(msg.content, i)}
+                          disabled={speakingIndex === i}
+                          title="Play question aloud"
+                        >
+                          {speakingIndex === i ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Volume2 className="h-3 w-3" />
+                          )}
+                        </Button>
+                      )}
+                    </div>
+                    <p className="text-sm leading-relaxed text-foreground">
+                      {msg.content}
+                    </p>
                   </div>
-                  <p className="text-sm leading-relaxed text-foreground">
-                    {msg.content}
-                  </p>
-                </div>
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </div>
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </div>
 
-        {/* Voice visualizer */}
-        {isRecording && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: "auto" }}
-            exit={{ opacity: 0, height: 0 }}
-            className="mb-4 flex items-center justify-center rounded-xl border border-primary/20 bg-primary/5 py-4"
-          >
-            <VoiceVisualizer isActive={true} size="sm" />
-            <span className="ml-4 text-xs text-primary">Listening...</span>
-          </motion.div>
-        )}
+          {/* Voice visualizer */}
+          {isRecording && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: "auto" }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mb-4 shrink-0 flex items-center justify-center rounded-xl border border-primary/20 bg-primary/5 py-4"
+            >
+              <VoiceVisualizer isActive={true} size="sm" />
+              <span className="ml-4 text-xs text-primary">Listening...</span>
+            </motion.div>
+          )}
 
-        {/* Input area */}
-        <div className="rounded-xl border border-border bg-card p-3">
-          <Textarea
-            value={textInput}
-            onChange={(e) => setTextInput(e.target.value)}
-            placeholder="Type your answer or use voice..."
-            className="min-h-[60px] resize-none border-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:ring-0"
-            onKeyDown={(e) => {
-              if (e.key === "Enter" && !e.shiftKey) {
-                e.preventDefault();
-                handleSend();
-              }
-            }}
-          />
-          <div className="mt-2 flex items-center justify-between">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setIsRecording(!isRecording)}
-              className={isRecording ? "text-primary" : "text-muted-foreground"}
-            >
-              {isRecording ? (
-                <MicOff className="h-4 w-4" />
-              ) : (
-                <Mic className="h-4 w-4" />
-              )}
-            </Button>
-            <Button
-              size="sm"
-              onClick={handleSend}
-              disabled={!textInput.trim() || agentThinking}
-              className="gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
-            >
-              {agentThinking ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <>
-                  Send
-                  <Send className="h-3 w-3" />
-                </>
-              )}
-            </Button>
+          {/* Input area */}
+          <div className="shrink-0 rounded-xl border border-border bg-card p-3">
+            <Textarea
+              value={textInput}
+              onChange={(e) => setTextInput(e.target.value)}
+              placeholder="Type your answer or use voice..."
+              className="min-h-[60px] resize-none border-0 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus-visible:ring-0"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                  handleSend();
+                }
+              }}
+            />
+            <div className="mt-2 flex items-center justify-between">
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsRecording(!isRecording)}
+                className={isRecording ? "text-primary" : "text-muted-foreground"}
+              >
+                {isRecording ? (
+                  <MicOff className="h-4 w-4" />
+                ) : (
+                  <Mic className="h-4 w-4" />
+                )}
+              </Button>
+              <Button
+                size="sm"
+                onClick={handleSend}
+                disabled={!textInput.trim() || agentThinking}
+                className="gap-1 bg-primary text-primary-foreground hover:bg-primary/90"
+              >
+                {agentThinking ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <>
+                    Send
+                    <Send className="h-3 w-3" />
+                  </>
+                )}
+              </Button>
+            </div>
           </div>
         </div>
       </div>

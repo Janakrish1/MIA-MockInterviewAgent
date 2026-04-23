@@ -43,16 +43,13 @@ def _run_graph(initial: InterviewState) -> dict:
 
 
 def _build_interviewer_prompt(question: str, score: float | None) -> str:
-    """Create natural interviewer transition before the next question."""
-    if score is None:
-        return question
-    if score >= 4.0:
-        prefix = "Great answer. Let's build on that."
-    elif score <= 2.0:
-        prefix = "Thanks for sharing. Let's break it down one step further."
-    else:
-        prefix = "Good effort. Let's go a bit deeper."
-    return f"{prefix} {question}"
+    """Return the question as-is.
+
+    Conversational acknowledgement and transition are now generated inside the LangGraph
+    prompts (see ``generate_question`` / ``generate_followup_question``), so we no longer
+    prepend a hardcoded prefix here (which previously caused double-acknowledgement).
+    """
+    return question
 
 
 @router.post("/turn", response_model=TurnResponse)

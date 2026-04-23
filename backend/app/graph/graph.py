@@ -21,10 +21,16 @@ GRAPH_PNG_PATH = Path(__file__).resolve().parent.parent.parent / "langgraph.png"
 
 
 def _route_after_score(state: InterviewState) -> str:
-    """If we have a user answer to score, go to score_answer; else go to generate_question."""
+    """Route at graph start.
+
+    If the user just answered a previous question, run the scoring branch
+    (score_answer -> retrieve -> adapt -> generate/followup). Otherwise this is
+    the first technical turn: still run retrieval so the first question is
+    grounded against the resume/intro, then generate.
+    """
     if state.get("last_user_answer") and state.get("current_question"):
         return "score_answer"
-    return "generate_question"
+    return "retrieve_related_questions"
 
 
 def _route_after_validate(state: InterviewState) -> str:
@@ -65,12 +71,26 @@ def build_interview_graph() -> CompiledStateGraph[InterviewState, dict, dict]:
     builder.add_conditional_edges(
         "__start__",
         _route_after_score,
-        path_map={"score_answer": "score_answer", "generate_question": "generate_question"},
+        path_map={
+            "score_answer": "score_answer",
+            "retrieve_related_questions": "retrieve_related_questions",
+        },
     )
 
     # User requested retrieval before difficulty adaptation.
     builder.add_edge("score_answer", "retrieve_related_questions")
-    builder.add_edge("retrieve_related_questions", "adapt_difficulty")
+    # After retrieval: if we just scored an answer, go adapt difficulty;
+    # otherwise (first technical turn) go straight to question generation.
+    builder.add_conditional_edges(
+        "retrieve_related_questions",
+        lambda s: "adapt_difficulty"
+        if s.get("last_user_answer") and s.get("current_question")
+        else "generate_question",
+        path_map={
+            "adapt_difficulty": "adapt_difficulty",
+            "generate_question": "generate_question",
+        },
+    )
     builder.add_conditional_edges(
         "adapt_difficulty",
         _route_after_adapt,
