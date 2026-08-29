@@ -2,6 +2,9 @@
 
 Mock Interview Agent (MIA) – practice interviews with AI feedback.
 
+**MIA transforms technical interview preparation into an adaptive AI interview experience with dynamic questioning, voice interaction, and performance-driven feedback.**
+
+
 ## Project structure
 
 - **`frontend/`** – React + Vite UI (interview flow, chat, TTS playback)
